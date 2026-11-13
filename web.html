@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fall Detection - Hệ thống phát hiện té ngã</title>
+
+  <!-- Thư viện MQTT và Chart.js -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f1f5f9;
+      color: #172033;
+    }
+    header {
+      background: #12345a;
+      color: white;
+      padding: 24px 18px;
+    }
+    .container { max-width: 1150px; margin: auto; }
+    header h1 { margin: 0 0 7px; font-size: 25px; }
+    header p { margin: 0; color: #dbeafe; }
+    main { padding: 20px 16px 40px; }
+
+    .panel {
+      background: white;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 17px;
+      box-shadow: 0 3px 12px rgba(0,0,0,.04);
+    }
+    .connection {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 15px;
+    }
+    .status { font-weight: bold; }
+    .dot {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #e5a000;
+      margin-right: 8px;
+    }
+    .dot.online { background: #16a34a; }
+    .dot.offline { background: #dc2626; }
+    .sub { color: #64748b; font-size: 13px; }
+
+    .data-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 13px;
+    }
+    .data-card small {
+      display: block;
+      color: #64748b;
+      margin-bottom: 9px;
+      font-size: 14px;
+    }
+    .number {
+      font-size: 28px;
+      font-weight: bold;
+    }
+    .unit { color: #64748b; font-size: 13px; }
+    .state-card { grid-column: span 2; }
+    .normal { color: #15803d; }
+    .danger { color: #dc2626; }
+
+    .alert {
+      margin-top: 14px;
+      padding: 15px 17px;
+      border-radius: 10px;
+      background: #dcfce7;
+      color: #166534;
+      font-weight: bold;
+    }
+    .alert.fall {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+
+    .chart-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      margin-top: 14px;
+    }
+    h2 { margin: 0 0 14px; font-size: 18px; }
+    .chart-box { height: 280px; position: relative; }
+
+    .control { margin-top: 14px; }
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 12px;
+    }
+    button {
+      border: 0;
+      border-radius: 8px;
+      padding: 11px 17px;
+      background: #e2e8f0;
+      color: #172033;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    button.primary { background: #2563eb; color: white; }
+    button.selected { outline: 3px solid #bfdbfe; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+
+    .note { margin-top: 14px; line-height: 1.5; color: #64748b; font-size: 13px; }
+
+    @media (max-width: 800px) {
+      .data-grid { grid-template-columns: repeat(2, 1fr); }
+      .chart-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 430px) {
+      .number { font-size: 22px; }
+      .chart-box { height: 235px; }
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <div class="container">
+      <h1>HỆ THỐNG PHÁT HIỆN TÉ NGÃ</h1>
+      <p>ESP32 – MPU6050 – FreeRTOS – MQTT</p>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- Trạng thái kết nối Broker -->
+    <section class="panel connection">
+      <div class="status">
+        <span id="mqttDot" class="dot"></span>
+        <span id="mqttStatus">Đang kết nối MQTT...</span>
+      </div>
+      <span class="sub">Broker: broker.emqx.io | WebSocket Secure: 8084</span>
+    </section>
+
+    <!-- Các thẻ hiển thị dữ liệu dạng số -->
+    <section class="data-grid">
+      <div class="panel data-card">
+        <small>Gia tốc trục X (Ax)</small>
+        <span class="number" id="ax">--</span> <span class="unit">g</span>
+      </div>
+      <div class="panel data-card">
+        <small>Gia tốc trục Y (Ay)</small>
+        <span class="number" id="ay">--</span> <span class="unit">g</span>
+      </div>
+      <div class="panel data-card">
+        <small>Gia tốc trục Z (Az)</small>
+        <span class="number" id="az">--</span> <span class="unit">g</span>
+      </div>
+      <div class="panel data-card">
+        <small>Gia tốc tổng hợp (Acc)</small>
+        <span class="number" id="acc">--</span> <span class="unit">g</span>
+      </div>
+      <div class="panel data-card">
+        <small>Góc nghiêng Pitch</small>
+        <span class="number" id="pitch">--</span> <span class="unit">°</span>
+      </div>
+      <div class="panel data-card">
+        <small>Góc nghiêng Roll</small>
+        <span class="number" id="roll">--</span> <span class="unit">°</span>
+      </div>
+      <div class="panel data-card state-card">
+        <small>Trạng thái phát hiện té ngã</small>
+        <span class="number normal" id="fallState">CHỜ DỮ LIỆU</span>
+      </div>
+    </section>
+
+    <div class="alert" id="alertBox">Chưa nhận được dữ liệu từ ESP32.</div>
+
+    <!-- Hai biểu đồ cập nhật theo dữ liệu MQTT -->
+    <section class="chart-grid">
+      <div class="panel">
+        <h2>Biểu đồ gia tốc theo thời gian</h2>
+        <div class="chart-box"><canvas id="accChart"></canvas></div>
+      </div>
+      <div class="panel">
+        <h2>Biểu đồ góc nghiêng theo thời gian</h2>
+        <div class="chart-box"><canvas id="angleChart"></canvas></div>
+      </div>
+    </section>
+
+    <!-- Điều khiển chế độ và thiết bị cảnh báo -->
+    <section class="panel control">
+      <h2>Điều khiển LED và còi cảnh báo</h2>
+      <p class="sub">
+        AUTO: ESP32 tự động bật LED và còi khi phát hiện té ngã.
+        MANUAL: người dùng điều khiển LED và còi trên Web.
+      </p>
+
+      <div class="button-row">
+        <button id="autoBtn" class="primary selected">Chế độ AUTO</button>
+        <button id="manualBtn">Chế độ MANUAL</button>
+      </div>
+
+      <div class="button-row">
+        <button id="ledBtn" disabled>LED: TẮT</button>
+        <button id="buzzerBtn" disabled>BUZZER: TẮT</button>
+      </div>
+
+      <p class="sub" id="controlStatus">Chế độ hiện tại: AUTO</p>
+    </section>
+
+    <p class="note">
+      Dữ liệu được nhận từ MQTT Broker. ESP32 sử dụng MQTT TCP port 1883,
+      còn trình duyệt sử dụng MQTT qua WebSocket Secure port 8084.
+      Các Topic và định dạng lệnh điều khiển được cấu hình theo code ESP32.
+    </p>
+  </main>
+
+  <script>
+    // =====================================================
+    // 1. CAU HINH MQTT - PHAI TRUNG VOI CODE ESP32
+    // =====================================================
+    const MQTT_URL = "wss://broker.emqx.io:8084/mqtt";
+
+    const TOPIC_DATA = "fall-detect/demo01/data";
+    const TOPIC_ALERT = "fall-detect/demo01/alert";
+    const TOPIC_CONTROL = "fall-detect/demo01/control";
+
+    const MAX_POINTS = 40;
+    const $ = id => document.getElementById(id);
+
+    let mode = "auto";
+    let ledState = false;
+    let buzzerState = false;
+
+    // =====================================================
+    // 2. KHOI TAO BIEU DO
+    // =====================================================
+    function createChart(canvasId, names, colors, min, max) {
+      return new Chart($(canvasId), {
+        type: "line",
+        data: {
+          labels: [],
+          datasets: names.map((name, index) => ({
+            label: name,
+            data: [],
+            borderColor: colors[index],
+            backgroundColor: colors[index],
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.2
+          }))
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          interaction: { intersect: false, mode: "index" },
+          plugins: { legend: { position: "bottom" } },
+          scales: {
+            y: { suggestedMin: min, suggestedMax: max },
+            x: { ticks: { maxTicksLimit: 7 } }
+          }
+        }
+      });
+    }
+
+    const accChart = createChart(
+      "accChart",
+      ["Ax", "Ay", "Az"],
+      ["#2563eb", "#16a34a", "#ea580c"],
+      -2, 2
+    );
+
+    const angleChart = createChart(
+      "angleChart",
+      ["Pitch", "Roll"],
+      ["#7c3aed", "#db2777"],
+      -90, 90
+    );
+
+    function addPoint(chart, values, time) {
+      chart.data.labels.push(time);
+
+      values.forEach((value, index) => {
+        chart.data.datasets[index].data.push(Number(value));
+      });
+
+      // Chi giu lai 40 mau gan nhat de bieu do khong qua tai
+      while (chart.data.labels.length > MAX_POINTS) {
+        chart.data.labels.shift();
+        chart.data.datasets.forEach(ds => ds.data.shift());
+      }
+
+      chart.update("none");
+    }
+
+    // =====================================================
+    // 3. HIEN THI DU LIEU NHAN TU ESP32
+    // =====================================================
+    function updateSensorData(data) {
+      const fields = ["ax", "ay", "az", "acc", "pitch", "roll"];
+
+      fields.forEach(field => {
+        const value = Number(data[field]);
+
+        if (Number.isFinite(value)) {
+          const decimal = (field === "pitch" || field === "roll") ? 1 : 2;
+          $(field).textContent = value.toFixed(decimal);
+        }
+      });
+
+      const isFall = Number(data.fall) === 1 || data.fall === true;
+
+      $("fallState").textContent = isFall
+        ? "PHÁT HIỆN TÉ NGÃ"
+        : "BÌNH THƯỜNG";
+
+      $("fallState").className =
+        "number " + (isFall ? "danger" : "normal");
+
+      $("alertBox").textContent = isFall
+        ? "CẢNH BÁO: Hệ thống phát hiện dấu hiệu té ngã!"
+        : "Hệ thống hoạt động bình thường, chưa phát hiện té ngã.";
+
+      $("alertBox").classList.toggle("fall", isFall);
+
+      const time = new Date().toLocaleTimeString();
+
+      if (["ax", "ay", "az"].every(k => Number.isFinite(Number(data[k])))) {
+        addPoint(accChart, [data.ax, data.ay, data.az], time);
+      }
+
+      if (["pitch", "roll"].every(k => Number.isFinite(Number(data[k])))) {
+        addPoint(angleChart, [data.pitch, data.roll], time);
+      }
+    }
+
+    // =====================================================
+    // 4. KET NOI MQTT
+    // =====================================================
+    const client = mqtt.connect(MQTT_URL, {
+      clientId: "fall-web-" + Math.random().toString(16).slice(2, 10),
+      clean: true,
+      connectTimeout: 10000,
+      reconnectPeriod: 3000
+    });
+
+    function setMqttStatus(connected, message) {
+      $("mqttDot").className = "dot " + (connected ? "online" : "offline");
+      $("mqttStatus").textContent = message;
+    }
+
+    client.on("connect", () => {
+      setMqttStatus(true, "MQTT ĐÃ KẾT NỐI");
+
+      client.subscribe(TOPIC_DATA);
+      client.subscribe(TOPIC_ALERT);
+
+      updateButtons();
+      sendControl();
+    });
+
+    client.on("reconnect", () => {
+      setMqttStatus(false, "ĐANG KẾT NỐI LẠI MQTT...");
+    });
+
+    client.on("offline", () => {
+      setMqttStatus(false, "MQTT NGOẠI TUYẾN");
+    });
+
+    client.on("error", error => {
+      setMqttStatus(false, "LỖI MQTT: " + error.message);
+      console.error("MQTT error:", error);
+    });
+
+    client.on("message", (topic, payload) => {
+      const message = payload.toString();
+
+      if (topic === TOPIC_DATA) {
+        try {
+          const data = JSON.parse(message);
+          updateSensorData(data);
+        } catch (error) {
+          console.error("JSON khong hop le:", message);
+        }
+      }
+
+      if (topic === TOPIC_ALERT) {
+        console.log("Trang thai canh bao:", message);
+      }
+    });
+
+    // =====================================================
+    // 5. GUI LENH DIEU KHIEN VE ESP32
+    // Dung dung dinh dang ma mqttCallback() dang doc:
+    // {"mode":"auto"}
+    // {"mode":"manual","led":1,"buzzer":0}
+    // =====================================================
+    function sendControl() {
+      if (!client.connected) {
+        $("controlStatus").textContent =
+          "MQTT chưa kết nối, chưa gửi được lệnh.";
+        return;
+      }
+
+      let command;
+
+      if (mode === "auto") {
+        command = { mode: "auto" };
+      } else {
+        command = {
+          mode: "manual",
+          led: ledState ? 1 : 0,
+          buzzer: buzzerState ? 1 : 0
+        };
+      }
+
+      client.publish(TOPIC_CONTROL, JSON.stringify(command));
+      updateButtons();
+    }
+
+    function updateButtons() {
+      $("autoBtn").classList.toggle("selected", mode === "auto");
+      $("manualBtn").classList.toggle("selected", mode === "manual");
+
+      $("ledBtn").disabled = mode !== "manual" || !client.connected;
+      $("buzzerBtn").disabled = mode !== "manual" || !client.connected;
+
+      $("ledBtn").textContent = "LED: " + (ledState ? "BẬT" : "TẮT");
+      $("buzzerBtn").textContent =
+        "BUZZER: " + (buzzerState ? "BẬT" : "TẮT");
+
+      $("controlStatus").textContent =
+        "Chế độ hiện tại: " + (mode === "auto" ? "AUTO" : "MANUAL");
+    }
+
+    // =====================================================
+    // 6. SU KIEN CAC NUT BUTTON
+    // =====================================================
+    $("autoBtn").addEventListener("click", () => {
+      mode = "auto";
+      sendControl();
+    });
+
+    $("manualBtn").addEventListener("click", () => {
+      mode = "manual";
+      sendControl();
+    });
+
+    $("ledBtn").addEventListener("click", () => {
+      if (mode !== "manual") return;
+      ledState = !ledState;
+      sendControl();
+    });
+
+    $("buzzerBtn").addEventListener("click", () => {
+      if (mode !== "manual") return;
+      buzzerState = !buzzerState;
+      sendControl();
+    });
+
+    updateButtons();
+  </script>
+</body>
+</html>
